@@ -3,25 +3,17 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// Package template doesn't exist. This file must be instantiated using the
-// go_template_instance rule in tools/go_generics/defs.bzl.
-package template
+// Package generic_seqatomic doesn't exist. This file must be instantiated
+// using the go_template_instance rule in tools/go_generics/defs.bzl.
+package generic_seqatomic
 
 import (
-	"fmt"
-	"reflect"
-	"strings"
 	"unsafe"
 
 	"gvisor.dev/gvisor/pkg/sync"
 )
 
 // Value is a required type parameter.
-//
-// Value must not contain any pointers, including interface objects, function
-// objects, slices, maps, channels, unsafe.Pointer, and arrays or structs
-// containing any of the above. An init() function will panic if this property
-// does not hold.
 type Value struct{}
 
 // SeqAtomicLoad returns a copy of *ptr, ensuring that the read does not race
@@ -54,13 +46,4 @@ func SeqAtomicTryLoad(seq *sync.SeqCount, epoch sync.SeqCountEpoch, ptr *Value) 
 	}
 	ok = seq.ReadOk(epoch)
 	return
-}
-
-func init() {
-	var val Value
-	typ := reflect.TypeOf(val)
-	name := typ.Name()
-	if ptrs := sync.PointersInType(typ, name); len(ptrs) != 0 {
-		panic(fmt.Sprintf("SeqAtomicLoad<%s> is invalid since values %s of type %s contain pointers:\n%s", typ, name, typ, strings.Join(ptrs, "\n")))
-	}
 }

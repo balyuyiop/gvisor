@@ -1,4 +1,4 @@
-// Copyright 2018 The gVisor Authors.
+// Copyright 2020 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,9 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// +build amd64 arm64
+// +build race
+// +build arm64
 
-package sleep
+#include "textflag.h"
 
-// See commit_noasm.go for a description of commitSleep.
-func commitSleep(g uintptr, waitingG *uintptr) bool
+// func RaceUncheckedAtomicCompareAndSwapUintptr(ptr *uintptr, old, new uintptr) bool
+TEXT ·RaceUncheckedAtomicCompareAndSwapUintptr(SB),NOSPLIT,$0-25
+	MOVD ptr+0(FP), R0
+	MOVD old+8(FP), R1
+	MOVD new+16(FP), R1
+again:
+	LDAXR (R0), R3
+	CMP R1, R3
+	BNE ok
+	STLXR R2, (R0), R3
+	CBNZ R3, again
+ok:
+	CSET EQ, R0
+	MOVB R0, ret+24(FP)
+	RET
+

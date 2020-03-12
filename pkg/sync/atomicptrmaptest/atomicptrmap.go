@@ -12,21 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "textflag.h"
+// Package atomicptrmap instantiates generic_atomicptrmap for testing.
+package atomicptrmap
 
-// See waiter_noasm_unsafe.go for a description of waiterUnlock.
-//
-// func waiterUnlock(ptr unsafe.Pointer, wg *unsafe.Pointer) bool
-TEXT ·waiterUnlock(SB),NOSPLIT,$0-24
-	MOVQ ptr+0(FP), DI
-	MOVQ wg+8(FP), SI
-
-	MOVQ $·preparingG(SB), AX
-	LOCK
-	CMPXCHGQ DI, 0(SI)
-
-	SETEQ AX
-	MOVB AX, ret+16(FP)
-
-	RET
-
+type testValue struct {
+	val int
+}
