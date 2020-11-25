@@ -52,7 +52,7 @@ def go_importpath(target):
     """Returns the importpath for the target."""
     return target[GoLibrary].importpath
 
-def go_library(name, **kwargs):
+def go_library(name, arch_deps = [], **kwargs):
     _go_library(
         name = name,
         importpath = "gvisor.dev/gvisor/" + native.package_name(),
