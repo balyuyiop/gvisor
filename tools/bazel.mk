@@ -14,6 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Should we use a docker-based build?
+DOCKER_BUILD := true
+
 # Make hacks.
 EMPTY :=
 SPACE := $(EMPTY) $(EMPTY)
@@ -21,8 +24,8 @@ SPACE := $(EMPTY) $(EMPTY)
 # See base Makefile.
 SHELL=/bin/bash -o pipefail
 BRANCH_NAME := $(shell (git branch --show-current 2>/dev/null || \
-			git rev-parse --abbrev-ref HEAD 2>/dev/null) | \
-			xargs -n 1 basename 2>/dev/null)
+  git rev-parse --abbrev-ref HEAD 2>/dev/null) | \
+  xargs -n 1 basename 2>/dev/null)
 BUILD_ROOTS := bazel-bin/ bazel-out/
 
 # Bazel container configuration (see below).
@@ -41,6 +44,10 @@ DOCKER_CONFIG := /etc/docker
 # Bazel flags.
 BAZEL := bazel $(STARTUP_OPTIONS)
 BASE_OPTIONS := --color=no --curses=no
+TEST_OPTIONS := --test_output=errors \
+  --keep_going \
+  --verbose_failures=true \
+  --build_event_json_file=.build_events.json
 
 # Basic options.
 UID := $(shell id -u ${USER})
@@ -159,12 +166,18 @@ bazel-alias: ## Emits an alias that can be used within the shell.
 .PHONY: bazel-alias
 
 bazel-server: ## Ensures that the server exists. Used as an internal target.
+ifeq ($(DOCKER_BUILD),true)
 	@docker exec $(FULL_DOCKER_EXEC_OPTIONS) $(DOCKER_NAME) true >&2 || $(MAKE) bazel-server-start >&2
+endif
 .PHONY: bazel-server
 
+ifeq ($(DOCKER_BUILD),true)
 # build_cmd builds the given targets in the bazel-server container.
 build_cmd = docker exec $(FULL_DOCKER_EXEC_OPTIONS) $(DOCKER_NAME) sh -o pipefail -c \
   '$(BAZEL) build $(BASE_OPTIONS) $(OPTIONS) "$(TARGETS)"'
+else
+build_cmd = $(BAZEL) build $(BASE_OPTIONS) $(OPTIONS) "$(TARGETS)"
+endif
 
 # build_paths extracts the built binary from the bazel stderr output.
 #
@@ -202,12 +215,15 @@ sudo: bazel-server
 	@$(call build_paths,sudo -E {} $(ARGS))
 .PHONY: sudo
 
+ifeq ($(DOCKER_BUILD),true)
+test_cmd = docker exec $(FULL_DOCKER_EXEC_OPTIONS) $(DOCKER_NAME) \
+  $(BAZEL) test $(BASE_OPTIONS) $(TEST_OPTIONS) $(OPTIONS) "$(TARGETS)"
+else
+test_cmd = $(BAZEL) test $(BASE_OPTIONS) $(TEST_OPTIONS) $(OPTIONS) "$(TARGETS)"
+endif
+
 test: bazel-server
-	@docker exec $(FULL_DOCKER_EXEC_OPTIONS) $(DOCKER_NAME) \
-	  $(BAZEL) test $(BASE_OPTIONS) \
-	                --test_output=errors --keep_going --verbose_failures=true \
-	                --build_event_json_file=.build_events.json \
-	                $(OPTIONS) $(TARGETS)
+	@$(test_cmd)
 .PHONY: test
 
 testlogs:
@@ -216,7 +232,13 @@ testlogs:
 	  awk -Ffile:// '{print $$2;}'
 .PHONY: testlogs
 
+ifeq ($(DOCKER_BUILD),true)
+query_cmd = docker exec $(FULL_DOCKER_EXEC_OPTIONS) $(DOCKER_NAME) sh -o pipefail -c \
+  '$(BAZEL) query $(BASE_OPTIONS) $(OPTIONS) "$(TARGETS)" 2>/dev/null'
+else
+query_cmd = $(BAZEL) query $(BASE_OPTIONS) $(OPTIONS) "$(TARGETS)" 2>/dev/null
+endif
+
 query: bazel-server
-	@docker exec $(FULL_DOCKER_EXEC_OPTIONS) $(DOCKER_NAME) sh -o pipefail -c \
-	  '$(BAZEL) query $(BASE_OPTIONS) $(OPTIONS) "$(TARGETS)" 2>/dev/null'
+	@$(query_cmd)
 .PHONY: query
