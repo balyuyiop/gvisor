@@ -96,9 +96,7 @@ type endpoint struct {
 	rcvClosed     bool
 
 	// The following fields are protected by the mu mutex.
-	mu            sync.RWMutex `state:"nosave"`
-	sndBufSize    int
-	sndBufSizeMax int
+	mu sync.RWMutex `state:"nosave"`
 	// state must be read/set using the EndpointState()/setEndpointState()
 	// methods.
 	state          EndpointState
@@ -109,7 +107,6 @@ type endpoint struct {
 	multicastAddr  tcpip.Address
 	multicastNICID tcpip.NICID
 	portFlags      ports.Flags
-	bindToDevice   tcpip.NICID
 
 	lastErrorMu sync.Mutex   `state:"nosave"`
 	lastError   *tcpip.Error `state:".(string)"`
@@ -144,9 +141,6 @@ type endpoint struct {
 	// owner is used to get uid and gid of the packet.
 	owner tcpip.PacketOwner
 
-	// linger is used for SO_LINGER socket option.
-	linger tcpip.LingerOption
-
 	// ops is used to get socket level options.
 	ops tcpip.SocketOptions
 }
@@ -179,18 +173,18 @@ func newEndpoint(s *stack.Stack, netProto tcpip.NetworkProtocolNumber, waiterQue
 		// Linux defaults to TTL=1.
 		multicastTTL:         1,
 		rcvBufSizeMax:        32 * 1024,
-		sndBufSizeMax:        32 * 1024,
 		multicastMemberships: make(map[multicastMembership]struct{}),
 		state:                StateInitial,
 		uniqueID:             s.UniqueID(),
 	}
 	e.ops.InitHandler(e)
 	e.ops.SetMulticastLoop(true)
+	e.ops.SetSendBufferSize(32 * 1024)
 
 	// Override with stack defaults.
 	var ss stack.SendBufferSizeOption
 	if err := s.Option(&ss); err == nil {
-		e.sndBufSizeMax = ss.Default
+		e.ops.SetSendBufferSize(ss.Default)
 	}
 
 	var rs stack.ReceiveBufferSizeOption
@@ -592,6 +586,25 @@ func (e *endpoint) OnReusePortSet(v bool) {
 	e.mu.Unlock()
 }
 
+// OnSendBufferSizeOptionSet implements tcpip.SocketOptionsHandler.OnSendBufferSizeOptionSet.
+func (e *endpoint) OnSendBufferSizeOptionSet(sendBufferSize int) int {
+	// Make sure the send buffer size is within the min and max
+	// allowed.
+	var ss stack.SendBufferSizeOption
+	if err := e.stack.Option(&ss); err != nil {
+		panic(fmt.Sprintf("e.stack.Option(%#v) = %s", ss, err))
+	}
+
+	v := sendBufferSize
+	if v < ss.Min {
+		v = ss.Min
+	}
+	if v > ss.Max {
+		v = ss.Max
+	}
+	return v
+}
+
 // SetSockOptInt implements tcpip.Endpoint.SetSockOptInt.
 func (e *endpoint) SetSockOptInt(opt tcpip.SockOptInt, v int) *tcpip.Error {
 	switch opt {
@@ -641,28 +654,16 @@ func (e *endpoint) SetSockOptInt(opt tcpip.SockOptInt, v int) *tcpip.Error {
 		e.rcvBufSizeMax = v
 		e.mu.Unlock()
 		return nil
-	case tcpip.SendBufferSizeOption:
-		// Make sure the send buffer size is within the min and max
-		// allowed.
-		var ss stack.SendBufferSizeOption
-		if err := e.stack.Option(&ss); err != nil {
-			panic(fmt.Sprintf("e.stack.Option(%#v) = %s", ss, err))
-		}
-
-		if v < ss.Min {
-			v = ss.Min
-		}
-		if v > ss.Max {
-			v = ss.Max
-		}
-
-		e.mu.Lock()
-		e.sndBufSizeMax = v
-		e.mu.Unlock()
-		return nil
 	}
 
 	return nil
+}
+
+func (e *endpoint) HasNIC(id int32) bool {
+	if id != 0 && !e.stack.HasNIC(tcpip.NICID(id)) {
+		return false
+	}
+	return true
 }
 
 // SetSockOpt implements tcpip.Endpoint.SetSockOpt.
@@ -781,22 +782,8 @@ func (e *endpoint) SetSockOpt(opt tcpip.SettableSocketOption) *tcpip.Error {
 
 		delete(e.multicastMemberships, memToRemove)
 
-	case *tcpip.BindToDeviceOption:
-		id := tcpip.NICID(*v)
-		if id != 0 && !e.stack.HasNIC(id) {
-			return tcpip.ErrUnknownDevice
-		}
-		e.mu.Lock()
-		e.bindToDevice = id
-		e.mu.Unlock()
-
 	case *tcpip.SocketDetachFilterOption:
 		return nil
-
-	case *tcpip.LingerOption:
-		e.mu.Lock()
-		e.linger = *v
-		e.mu.Unlock()
 	}
 	return nil
 }
@@ -836,12 +823,6 @@ func (e *endpoint) GetSockOptInt(opt tcpip.SockOptInt) (int, *tcpip.Error) {
 		e.rcvMu.Unlock()
 		return v, nil
 
-	case tcpip.SendBufferSizeOption:
-		e.mu.Lock()
-		v := e.sndBufSizeMax
-		e.mu.Unlock()
-		return v, nil
-
 	case tcpip.ReceiveBufferSizeOption:
 		e.rcvMu.Lock()
 		v := e.rcvBufSizeMax
@@ -869,16 +850,6 @@ func (e *endpoint) GetSockOpt(opt tcpip.GettableSocketOption) *tcpip.Error {
 			e.multicastAddr,
 		}
 		e.mu.Unlock()
-
-	case *tcpip.BindToDeviceOption:
-		e.mu.RLock()
-		*o = tcpip.BindToDeviceOption(e.bindToDevice)
-		e.mu.RUnlock()
-
-	case *tcpip.LingerOption:
-		e.mu.RLock()
-		*o = e.linger
-		e.mu.RUnlock()
 
 	default:
 		return tcpip.ErrUnknownProtocolOption
@@ -1129,21 +1100,22 @@ func (*endpoint) Accept(*tcpip.FullAddress) (tcpip.Endpoint, *waiter.Queue, *tcp
 }
 
 func (e *endpoint) registerWithStack(nicID tcpip.NICID, netProtos []tcpip.NetworkProtocolNumber, id stack.TransportEndpointID) (stack.TransportEndpointID, tcpip.NICID, *tcpip.Error) {
+	bindToDevice := tcpip.NICID(e.ops.GetBindToDevice())
 	if e.ID.LocalPort == 0 {
-		port, err := e.stack.ReservePort(netProtos, ProtocolNumber, id.LocalAddress, id.LocalPort, e.portFlags, e.bindToDevice, tcpip.FullAddress{}, nil /* testPort */)
+		port, err := e.stack.ReservePort(netProtos, ProtocolNumber, id.LocalAddress, id.LocalPort, e.portFlags, bindToDevice, tcpip.FullAddress{}, nil /* testPort */)
 		if err != nil {
-			return id, e.bindToDevice, err
+			return id, bindToDevice, err
 		}
 		id.LocalPort = port
 	}
 	e.boundPortFlags = e.portFlags
 
-	err := e.stack.RegisterTransportEndpoint(nicID, netProtos, ProtocolNumber, id, e, e.boundPortFlags, e.bindToDevice)
+	err := e.stack.RegisterTransportEndpoint(nicID, netProtos, ProtocolNumber, id, e, e.boundPortFlags, bindToDevice)
 	if err != nil {
-		e.stack.ReleasePort(netProtos, ProtocolNumber, id.LocalAddress, id.LocalPort, e.boundPortFlags, e.bindToDevice, tcpip.FullAddress{})
+		e.stack.ReleasePort(netProtos, ProtocolNumber, id.LocalAddress, id.LocalPort, e.boundPortFlags, bindToDevice, tcpip.FullAddress{})
 		e.boundPortFlags = ports.Flags{}
 	}
-	return id, e.bindToDevice, err
+	return id, bindToDevice, err
 }
 
 func (e *endpoint) bindLocked(addr tcpip.FullAddress) *tcpip.Error {
