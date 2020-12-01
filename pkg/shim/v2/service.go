@@ -191,7 +191,7 @@ func (s *service) StartShim(ctx context.Context, id, containerdBinary, container
 	if err != nil {
 		return "", err
 	}
-	address, err := shim.SocketAddress(ctx, id)
+	address, err := shim.SocketAddress(ctx, containerdAddress, id)
 	if err != nil {
 		return "", err
 	}
