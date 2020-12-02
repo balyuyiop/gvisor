@@ -15,6 +15,7 @@
 package vfs
 
 import (
+	"io"
 	"sync/atomic"
 
 	"gvisor.dev/gvisor/pkg/abi/linux"
@@ -834,44 +835,28 @@ func (fd *FileDescription) SetAsyncHandler(newHandler func() FileAsync) FileAsyn
 	return fd.asyncHandler
 }
 
-// FileReadWriteSeeker is a helper struct to pass a FileDescription as
-// io.Reader/io.Writer/io.ReadSeeker/io.ReaderAt/io.WriterAt/etc.
-type FileReadWriteSeeker struct {
-	FD    *FileDescription
-	Ctx   context.Context
-	ROpts ReadOptions
-	WOpts WriteOptions
-}
-
-// ReadAt implements io.ReaderAt.ReadAt.
-func (f *FileReadWriteSeeker) ReadAt(p []byte, off int64) (int, error) {
-	dst := usermem.BytesIOSequence(p)
-	n, err := f.FD.PRead(f.Ctx, dst, off, f.ROpts)
-	return int(n), err
-}
-
-// Read implements io.ReadWriteSeeker.Read.
-func (f *FileReadWriteSeeker) Read(p []byte) (int, error) {
-	dst := usermem.BytesIOSequence(p)
-	n, err := f.FD.Read(f.Ctx, dst, f.ROpts)
-	return int(n), err
-}
-
-// Seek implements io.ReadWriteSeeker.Seek.
-func (f *FileReadWriteSeeker) Seek(offset int64, whence int) (int64, error) {
-	return f.FD.Seek(f.Ctx, offset, int32(whence))
-}
-
-// WriteAt implements io.WriterAt.WriteAt.
-func (f *FileReadWriteSeeker) WriteAt(p []byte, off int64) (int, error) {
-	dst := usermem.BytesIOSequence(p)
-	n, err := f.FD.PWrite(f.Ctx, dst, off, f.WOpts)
-	return int(n), err
-}
-
-// Write implements io.ReadWriteSeeker.Write.
-func (f *FileReadWriteSeeker) Write(p []byte) (int, error) {
-	buf := usermem.BytesIOSequence(p)
-	n, err := f.FD.Write(f.Ctx, buf, f.WOpts)
-	return int(n), err
+// CopyRegularFileData copies data from srcFD to dstFD until reading from srcFD
+// returns EOF or an error. It returns the number of bytes copied.
+func CopyRegularFileData(ctx context.Context, dstFD, srcFD *FileDescription) (int64, error) {
+	done := int64(0)
+	bufIOSeq := usermem.BytesIOSequence(make([]byte, 32*1024)) // arbitrary buffer size
+	for {
+		readN, readErr := srcFD.Read(ctx, bufIOSeq, ReadOptions{})
+		if readErr != nil && readErr != io.EOF {
+			return done, readErr
+		}
+		srcIOSeq := bufIOSeq.TakeFirst64(readN)
+		iterDone := int64(0)
+		for iterDone < readN {
+			writeN, writeErr := dstFD.Write(ctx, srcIOSeq.DropFirst64(iterDone), WriteOptions{})
+			done += writeN
+			iterDone += writeN
+			if writeErr != nil {
+				return done, writeErr
+			}
+		}
+		if readErr == io.EOF {
+			return done, nil
+		}
+	}
 }
